@@ -108,16 +108,15 @@ struct message_packet_t {
     int number_beep;
     int number_blink;
     int output_volt;
-    int TP12;                   // AC-CURRENT-M2
+    int TP1;                    // PWM ON/OFF in PILOT STATE A/B tests
     int TP19;                   // GFCI-CURRENT-SENSE
     int TP21;                   // +12 VDC
     int TP22;                   // -12 VDC
-    int TP25;                   // 3.3 VDC
+    int TP23;                   // 3.3 VDC
     int TP26;                   // TEMPERATURE
     int TP35;                   // +12 IN
+    int TP38;                   // 1.8(V) -> 3.3(V) in GROUND test
 };
-
-// struct message_packet_t message_packet;
 
 uint8_t led_sequence[][3] = {
     {183,9,18},
@@ -241,6 +240,7 @@ enum state_t {
     _TEST_9,
     _TEST_10,
     _TEST_11,
+    _TEST_12,
     _ABORT,
     _END
 };
@@ -250,7 +250,8 @@ enum event_t {
     test_start      =   0x30,
     test_abort      =   0x31,
     test_complete   =   0x32,
-    test_next       =   0x33                        
+    test_next       =   0x33,
+    test_debug      =   0x2A                        
 };
 
 /* define a row in state transition matrix */
@@ -273,6 +274,7 @@ static struct state_transit_row_t state_transition_matrix[] = {
     {_TEST_8, test_next, _TEST_9},
     {_TEST_9, test_next, _TEST_10},
     {_TEST_10, test_next, _TEST_11},
+    {_TEST_1, test_debug, _TEST_12},
     {_TEST_1, test_abort, _ABORT},
     {_TEST_2, test_abort, _ABORT},
     {_TEST_3, test_abort, _ABORT},
@@ -284,7 +286,8 @@ static struct state_transit_row_t state_transition_matrix[] = {
     {_TEST_9, test_abort, _ABORT},
     {_TEST_10, test_abort, _ABORT},
     {_TEST_11, test_abort, _ABORT},
-    {_TEST_11, test_next, _ABORT}
+    {_TEST_12, test_abort, _ABORT},
+    {_TEST_12, test_next, _ABORT}
 };
 
 /* define a row in state function matrix */
@@ -306,6 +309,7 @@ static struct state_function_row_t state_function_matrix[] = {
     {"GFCI_L2_LOW_LEAKAGE", test_9},
     {"GFCI_L2_HIGH_LEAKAGE", test_10},
     {"STUCK RELAY", test_11},
+    {"UART", test_12},
     {"STATE ABORT 1", _abort},
     {"STATE ABORT 2", _abort},
     {"STATE ABORT 3", _abort},
@@ -317,6 +321,7 @@ static struct state_function_row_t state_function_matrix[] = {
     {"STATE ABORT 9", _abort},
     {"STATE ABORT 10", _abort},
     {"STATE ABORT 11", _abort},
+    {"STATE ABORT 12", _abort},
     {"THE END", _abort}
 };
 
@@ -328,8 +333,8 @@ void transition_look_up(struct state_machine_t* state_machine, enum event_t even
     for (uint8_t i=0;i<sizeof(state_transition_matrix)/sizeof(state_transition_matrix[0]);i++) {
         if (state_transition_matrix[i].current_state == state_machine->current_state) {
             if (state_transition_matrix[i].event == event) {
-                uart0_puts(state_function_matrix[i].name);
-                uart0_puts("\r\n");
+                // uart0_puts(state_function_matrix[i].name);
+                // uart0_puts("\r\n");
 
                 (state_function_matrix[i].func)();
                 state_machine->current_state = state_transition_matrix[i].next_state;
@@ -403,7 +408,8 @@ void init_system() {
     // init_timer3();
     multimeter_init();
 
-    // uart3_puts(":01w20=0,0,\r\n");
+    uart3_puts(":01w20=0,0,\r\n");
+    _delay_ms(50);
     uart3_puts(":01w12=0,\r\n");                                    // turn off DPM-8605 output if it's on for whatever reason
 
     set_sleep_mode(0);                                              // in Idle Mode, UART still runs
@@ -487,8 +493,8 @@ void test_1() {
     // uart0_puts(buffer);
 
     uint16_t x = sqrt(true_rms_sum/true_rms_num);
-    sprintf(buffer,"rms: %u\r\n", x);
-    uart0_puts(buffer);
+    // sprintf(buffer,"rms: %u\r\n", x);
+    // uart0_puts(buffer);
 
     /* TP voltage measurement */
     RT68_ON                                                         // connect multimeter v- to DUT GND
@@ -533,13 +539,14 @@ void test_1() {
         message_packet.number_blink = PS;
     }
     message_packet.output_volt = x;
-    message_packet.TP12 = 0x3030;
+    message_packet.TP1 = 0x3030;
     message_packet.TP19 = 0x3030;
     message_packet.TP21 = volt_tp21;
     message_packet.TP22 = volt_tp22;
-    message_packet.TP25 = volt_tp25;
+    message_packet.TP23 = volt_tp25;
     message_packet.TP26 = volt_tp26;
     message_packet.TP35 = volt_tp35;
+    message_packet.TP38 = 0x3030;
 
     char* p = (char*)&message_packet;
 
@@ -988,14 +995,20 @@ void test_6() {
     uint8_t led_blink = 0;
     uint8_t edge_direction = 0;                                     // default direction is rising
     uint32_t t_1 = 0;
+    uint32_t t_set_psu = 0;
     uint32_t t_L1_L2_OUT_OFF = 0;
     uint16_t x = 0;
+    uint16_t interval = 800;
+    uint8_t base_volt = 0;
+    uint8_t j = 0;
     bool red_on = true;
     bool rms_read = true;
     bool rms_reset = true;
     bool psu_on = true;
     bool positive_edge_detected = false;
     bool negative_edge_detected = false;
+
+    char *psu_voltage[] = {"160", "161", "162", "163", "164", "165", "166", "167", "168", "169", "170", "171", "172", "173", "174", "175", "176", "177", "178", "179"};
 
     PORTF |= (1<<PF2);
 
@@ -1014,21 +1027,34 @@ void test_6() {
         switch (state)
         {
         case STATE_INIT:
-            /* how do I send serial command every second (?) inside this busy loop? */
             PORTA &= ~((1 << PA4) | (1 << PA5));                            // connect TP29, TP30 to dc variable supply
+            
             uart3_puts(":01w20=160,500,\r\n");
+            _delay_ms(50);
             uart3_puts(":01w12=1,\r\n");
+            t_set_psu = tick;
             state = STATE_NEXT;
             break;
         
         case STATE_NEXT:
-            //
-            // uart0_puts("in next state\r\n");
-            state = STATE_END;
+            if (tick - t_set_psu > interval) {
+                char cmd[] = ":01w10=";
+                strcat(cmd, psu_voltage[j++]);
+                strcat(cmd, ",\r\n");
+                uart3_puts(cmd);
+                t_set_psu += interval;
+            }
+            // if (tick - t_L1_L2_OUT_OFF > 10000 && negative_edge_detected) {
+            //     state = STATE_END;
+            // }
+            if (j==20) {
+                state = STATE_END;
+            }
             break;
         
         case STATE_END:
             // DO NOTHING
+            // uart0_puts("end");
             break;
 
         default:
@@ -1103,6 +1129,12 @@ void test_6() {
             }
 
             beep_flag = false;
+        }
+
+        /* */
+        if (tick - t_0 > interval) {
+            //
+
         }
 
         /*  L1_OUT & L2_OUT comes on ~2.2s before entering for loop  */
@@ -1586,6 +1618,28 @@ void test_11() {
     }
 }
 
+void test_12() {
+    RT67_ON
+    _delay_ms(100);
+    // PORTA &= ~((1 << PA6) | (1 << PA7));
+    // _delay_ms(1000);
+
+    // UCSR2B |= (1 << RXCIE2); 
+
+    uint8_t cmd[] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
+
+    for (uint8_t i=0;i<16;i++) {
+        uart2_transmit(cmd[i]);
+    }
+
+    RT67_OFF
+    // _delay_ms(1000);
+    // PORTA |= ((1 << PA6) | (1 << PA7));
+
+    sprintf(buffer, "UART2 RX: %u\r\n", s);
+    uart0_puts(buffer);
+}
+
 void _abort() {
     uart0_puts("test aborted!\r\n");
     
@@ -1751,6 +1805,12 @@ ISR(INT3_vect) {
 ISR(USART0_RX_vect) {
     message = UDR0;
     message_ready = true;
+}
+
+ISR(USART2_RX_vect) {
+    // message = UDR2;
+    // message_ready = true;
+    // s++;
 }
 
 ISR(ADC_vect) {
