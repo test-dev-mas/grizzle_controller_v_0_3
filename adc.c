@@ -3,12 +3,20 @@
 
 void init_adc() {
     ADMUX |= (1 << REFS0);                                                      // AVCC at AREF
-    ADMUX |= (1 << MUX0) | (1 << MUX1);                                         // ADC3
     ADMUX |= (1 << ADLAR);                                                      // left algined
     ADCSRA |= (1 << ADPS0) | (1 << ADPS1) | (1 << ADPS2);                       // f_adc = f / 128
     ADCSRA |= (1 << ADATE);
     ADCSRA |= (1 << ADIE);
     ADCSRA |= (1 << ADEN);
+}
+
+void select_adc2() {
+    ADMUX |= (1 << MUX1);                                                       // ADC2
+    ADMUX &= ~(1 << MUX0);
+}
+
+void select_adc3() {
+    ADMUX |= (1 << MUX0) | (1 << MUX1);                                         // ADC3
 }
 
 void disable_adc() {

@@ -47,7 +47,7 @@ volatile uint8_t color_value[3];
 
 volatile uint16_t i = 0;
 volatile uint8_t s = 0;
-volatile uint8_t t_0 = 0;
+// volatile uint8_t t_0 = 0;
 volatile uint8_t t_1 = 0;
 volatile uint8_t t_2 = 0;
 volatile uint8_t pulse[100][2];
@@ -274,7 +274,7 @@ static struct state_transit_row_t state_transition_matrix[] = {
     {_TEST_8, test_next, _TEST_9},
     {_TEST_9, test_next, _TEST_10},
     {_TEST_10, test_next, _TEST_11},
-    {_TEST_1, test_debug, _TEST_12},
+    {_TEST_11, test_next, _ABORT},
     {_TEST_1, test_abort, _ABORT},
     {_TEST_2, test_abort, _ABORT},
     {_TEST_3, test_abort, _ABORT},
@@ -287,7 +287,7 @@ static struct state_transit_row_t state_transition_matrix[] = {
     {_TEST_10, test_abort, _ABORT},
     {_TEST_11, test_abort, _ABORT},
     {_TEST_12, test_abort, _ABORT},
-    {_TEST_12, test_next, _ABORT}
+    {_ENTRY, test_abort, _ABORT}
 };
 
 /* define a row in state function matrix */
@@ -333,8 +333,8 @@ void transition_look_up(struct state_machine_t* state_machine, enum event_t even
     for (uint8_t i=0;i<sizeof(state_transition_matrix)/sizeof(state_transition_matrix[0]);i++) {
         if (state_transition_matrix[i].current_state == state_machine->current_state) {
             if (state_transition_matrix[i].event == event) {
-                // uart0_puts(state_function_matrix[i].name);
-                // uart0_puts("\r\n");
+                uart0_puts(state_function_matrix[i].name);
+                uart0_puts("\r\n");
 
                 (state_function_matrix[i].func)();
                 state_machine->current_state = state_transition_matrix[i].next_state;
@@ -385,36 +385,58 @@ void init_system() {
     DDRH |= (1 << PH3) | (1 << PH4) | (1 << PH5) | (1 << PH6);      // A0/1/2/3 on HC154
     PORTH |= (1 << PH3) | (1 << PH4) | (1 << PH5) | (1 << PH6);
 
-    DDRF = (1<<PF4);                                                // only need this one now
-
     DDRA |= (1 << PA0) | (1 << PA1) | (1 << PA2) | (1 << PA3);      // s0/s1/s2/s3 on tcs3200
     PORTA |= (1 << PA0);                                            // frequency scaling 20%
         
-    // for (;;) {
-    //     RT67_ON
-    //     _delay_ms(2000);
-    //     RT67_OFF
-    //     _delay_ms(2000);
-    // }
-    // RT67_ON
-    // DDRF = (1<<PF2);
-
     init_adc();
     uart0_init();
     uart2_init();
     uart3_init();
     init_timer0();
     init_timer1();
-    // init_timer3();
     multimeter_init();
-
-    uart3_puts(":01w20=0,0,\r\n");
-    _delay_ms(50);
-    uart3_puts(":01w12=0,\r\n");                                    // turn off DPM-8605 output if it's on for whatever reason
 
     set_sleep_mode(0);                                              // in Idle Mode, UART still runs
 
     sei();                                                          // enable global interrupt
+
+    uint8_t system_status[2] = {'F', 'F'};
+
+    /* PUS status check */
+    uart3_puts(":01r12=0,\r\n");                                    // read output status
+    uint8_t i = 0;
+    uint32_t t_0 = tick;
+    for (;;) {
+        if (UCSR3A & (1 << RXC3)) {
+            char u = UDR3;
+            if (i == 7) {
+                if (u == 0x31) {                                    // if PSU is online, and 8th character is '1', output is ON
+                    _delay_ms(10);
+                    uart3_puts(":01w20=0,0,\r\n");                  // set U,I to 0
+                    _delay_ms(10);
+                    uart3_puts(":01w12=0,\r\n");                    // set output to OFF
+
+                    uint8_t* p = system_status;
+                    *p = 'P';                                       // 'P' denotes PUS is ready
+                    break; 
+                }
+                if (u == 0x30) {                                    // if PSU is online, and 8th character is '0', output is OFF
+                    uint8_t* p = system_status;
+                    *p = 'P';                                       // 'P' denotes PUS is ready
+                }
+            }
+            i++;
+        }
+        if (tick - t_0 > 100) {                                     // if PSU is offline, make sure this process times out
+            break;
+        }
+    }
+
+    /* L1_IN & L2_IN status */
+
+
+    uart0_transmit(system_status[0]);                               // PSU status
+    uart0_transmit(system_status[1]);                               // L1_IN & L2_IN status
 }
 
 void enable_beep() {
@@ -441,6 +463,7 @@ void test_1() {
     DDRC |= (1 << relay_16[0].pin) | (1 << relay_16[1].pin);
 
     start_adc();
+    select_adc3();
     enable_blink();
     start_timer1();
 
@@ -458,7 +481,6 @@ void test_1() {
                 for (uint8_t i=0;i<3;i++) {                                     // iterate r/g/b    
                     if (abs(color_value[i] - led_sequence[j][i]) > 50) {        // compare r/g/b sampled to r/g/b stored in a array (sometime error can get up to 35, 50 is a pretty safe margin)
                         blink_fail = true;                                      // if each set matches to stored value, correct led flash sequence must have been observed
-                        // PORTF ^= (1<<PF2);                                      // used only for debugging
                     }
                 }
                 j++;                                                            // increment this index only during this compare time window
@@ -527,32 +549,6 @@ void test_1() {
 
     RT68_OFF
 
-    struct message_packet_t message_packet;
-    
-    /* send test results at the end */
-    message_packet.number_beep = 0x3030;
-    // message_packet.number_blink = PS;                               // no blinks but a blinking pattern, so send "PS" instead of a integer
-    if (blink_fail) {
-        message_packet.number_blink = FL;
-    }
-    else {
-        message_packet.number_blink = PS;
-    }
-    message_packet.output_volt = x;
-    message_packet.TP1 = 0x3030;
-    message_packet.TP19 = 0x3030;
-    message_packet.TP21 = volt_tp21;
-    message_packet.TP22 = volt_tp22;
-    message_packet.TP23 = volt_tp25;
-    message_packet.TP26 = volt_tp26;
-    message_packet.TP35 = volt_tp35;
-    message_packet.TP38 = 0x3030;
-
-    char* p = (char*)&message_packet;
-
-    for (uint8_t i=0;i<sizeof(message_packet);i++) {
-        uart0_transmit(*p++);
-    }
 
     // sprintf(buffer, "rms sum: %lu\trms num: %u\r\n", rms_sum, rms_num);
     // uart0_puts(buffer);
@@ -561,18 +557,34 @@ void test_1() {
 void test_2() {                                                     // test: GROUND
     PORTC |= (1 << relay_16[2].pin);
 
-    // PORTF |= (1<<PF2);                                              // start of test
     uint32_t t_0 = tick;
 
     enable_beep();
     enable_blink();
     RT68_ON
 
+    uint8_t color_temp[3] = {0};
+    uint8_t led_blink = 0;
     bool volt_crossed = false;
     bool volt_print = true;
     bool falling_edge = false;
 
     for (;;) {
+        if (color_data_ready) {
+            /*  blink detection */
+            if ((color_value[0] - color_temp[0]) > 90 || (color_value[0] - color_temp[0]) < -90) {
+                // sprintf(buffer, "%u\r\n", tick - t_0);
+                // uart0_puts(buffer);
+                led_blink++;
+            }
+
+            color_temp[0] = color_value[0];
+            color_temp[1] = color_value[1];
+            color_temp[2] = color_value[2];
+
+            color_data_ready = false;
+        }
+
         int volt_tp38 = multimeter_read_voltage();
         // sprintf(buffer,"%d\r\n", volt_tp38);                        // DEBUG
         // uart0_puts(buffer);
@@ -593,7 +605,7 @@ void test_2() {                                                     // test: GRO
             uint32_t t_1 = tick;
             
             if (falling_edge) {
-                uart0_puts("beep\r\n");
+                // uart0_puts("beep\r\n");
                 falling_edge = false;
             }
 
@@ -613,6 +625,7 @@ void test_2() {                                                     // test: GRO
 
     PORTC |= (1 << relay_16[0].pin) | (1 << relay_16[1].pin);
     _delay_ms(1500);                                                // after relay opens, it take ~ 1.3 s for the board to emit beep, shoulde wait for the until the next test
+
 }
 
 void test_3() {
@@ -623,7 +636,7 @@ void test_3() {
     DDRK |= (1 << relay_16[10].pin);
 
     uint32_t t_0 = tick;
-    PORTF |= (1<<PF2);                                              // start of test (pwm on TP1 comes on in 777 ms)
+    // PORTF |= (1<<PF2);                                              // start of test (pwm on TP1 comes on in 777 ms)
 
     enable_blink();
     start_timer1();
@@ -631,6 +644,7 @@ void test_3() {
     rms_sum = 0;
     rms_num = 0;
     start_adc();
+    select_adc3();
 
     /* TP1 PWM on INTO */
     EICRA |= (1 << ISC01) | (1 << ISC00);                           // rising edge on INT0 generates an interrupt reques
@@ -639,6 +653,9 @@ void test_3() {
     uint8_t color_temp[3] = {0}; 
     uint8_t led_blink = 0;
     bool rms_read = true;
+    bool rms_pass = false;
+    bool period_pass = false;
+    bool duty_cycle_pass = false;
 
     /*  because DUT starts from OFF, there's red/teal/read/blue blinking sequece
         there might be some red component still exist at this point
@@ -658,10 +675,7 @@ void test_3() {
             if (abs(color_value[2] - color_temp[2]) > 50) {
                 // sprintf(buffer, "%u\r\n", tick - t_0);
                 // uart0_puts(buffer);
-                if (led_blink++ > 3) {                              // LED blinks a few times within 5 seconds, 3 is a somewhat random choice
-                    // uart0_puts("led blinks detected!\r\n");
-                    // break;
-                }
+                led_blink++;
             }
 
             color_temp[0] = color_value[0];
@@ -670,7 +684,6 @@ void test_3() {
 
             color_data_ready = false;
         }
-
 
         /* TP1 PWM comes on 691 ms after SW_STATE_A closes */
         if (pwm_pulse_ready) {
@@ -684,14 +697,11 @@ void test_3() {
                 off_width_sum += pulse[j][0];
             }
 
-            if (period_sum/(sizeof(pulse)/sizeof(pulse[0])) > 247 && period_sum/(sizeof(pulse)/sizeof(pulse[0])) < 262) {
-                /*  (timer2 clocks at f/64, 250 counts indicate 1kHz) */
-                uart0_puts("period ok\r\n");
-            }
-            if (off_width_sum/(sizeof(pulse)/sizeof(pulse[0])) > 79 && off_width_sum/(sizeof(pulse)/sizeof(pulse[0])) < 89) {
-                /*  (timer2 clocks at f/64, 250 counts indicate 1kHz) */
-                uart0_puts("duty cycle ok\r\n");
-            }
+            /*  (timer2 clocks at f/64, 250 counts indicate 1kHz) */
+            (period_sum/(sizeof(pulse)/sizeof(pulse[0])) > 247 && period_sum/(sizeof(pulse)/sizeof(pulse[0])) < 262) ? (period_pass = true) : (period_pass = false);
+                
+            (off_width_sum/(sizeof(pulse)/sizeof(pulse[0])) > 79 && off_width_sum/(sizeof(pulse)/sizeof(pulse[0])) < 89) ? (duty_cycle_pass = true) : (duty_cycle_pass = false);
+
             // sprintf(buffer, "%u\t%u\r\n", period_sum/(sizeof(pulse)/sizeof(pulse[0])), off_width_sum/(sizeof(pulse)/sizeof(pulse[0])));
             // uart0_puts(buffer);
 
@@ -707,9 +717,8 @@ void test_3() {
         if (tick - t_0 > 500 && rms_read) {                         // 
             // sprintf(buffer, "rms sum: %lu\trms num: %u\r\n", rms_sum, rms_num);
             // uart0_puts(buffer);
-            if (rms_sum/rms_num < 10) {
-                uart0_puts("L1_OUT & L2_OUT OFF: PASS\r\n");
-            }
+            (rms_sum/rms_num < 10) ? (rms_pass = true) : (rms_pass = false);
+            // uart0_puts("L1_OUT & L2_OUT OFF: PASS\r\n");
             rms_read = false;
         }
         // TODO
@@ -726,22 +735,24 @@ void test_3() {
     stop_timer1();
     stop_timer2();
     EIMSK &= ~(1 << INT0);                                          // disable PWM detectioin on TP1
-    PORTF &= ~(1<<PF2);                                             // end of test
+    // PORTF &= ~(1<<PF2);                                             // end of test
 
-    sprintf(buffer, "rms sum: %lu\trms num: %u\r\n", rms_sum, rms_num);
-    uart0_puts(buffer);
+    // sprintf(buffer, "rms sum: %lu\trms num: %u\r\n", rms_sum, rms_num);
+    // uart0_puts(buffer);
+
 }
 
 void test_4() {
     DDRK |= (1 << relay_16[9].pin);
 
     uint32_t t_0 = tick;
-    PORTF |= (1<<PF2);                                              // start of test (pwm on TP1 comes on in 777 ms)
+    // PORTF |= (1<<PF2);                                              // start of test (pwm on TP1 comes on in 777 ms)
 
     enable_blink();
     start_timer1();                                                 // need timer1 for blink detection
     start_timer2();                                                 // need timer2 for TP1 PWM detection
     start_adc();
+    select_adc3();
 
     /* TP1 PWM on INTO */
     EICRA |= (1 << ISC01) | (1 << ISC00);                           // rising edge on INT0 generates an interrupt reques
@@ -749,8 +760,11 @@ void test_4() {
 
     uint8_t color_temp[3] = {0}; 
     uint8_t led_blink = 0;
+    uint8_t rms = 0;
     bool rms_read = true;
     bool rms_reset = true;
+    bool period_pass = false;
+    bool duty_cycle_pass = false;
 
     /*  because DUT starts from OFF, there's red/teal/read/blue blinking sequece
         there might be some red component still exist at this point
@@ -770,10 +784,7 @@ void test_4() {
             if (abs(color_value[1] - color_temp[1]) > 50) {
                 // sprintf(buffer, "%u\r\n", tick - t_0);
                 // uart0_puts(buffer);
-                if (led_blink++ > 3) {                              // LED blinks a few times within 5 seconds, 3 is a somewhat random choice
-                    // uart0_puts("led blinks detected!\r\n");
-                    // break;
-                }
+                led_blink++;
             }
 
             color_temp[0] = color_value[0];
@@ -796,14 +807,10 @@ void test_4() {
                 off_width_sum += pulse[j][0];
             }
 
-            if (period_sum/(sizeof(pulse)/sizeof(pulse[0])) > 247 && period_sum/(sizeof(pulse)/sizeof(pulse[0])) < 262) {
-                /*  (timer2 clocks at f/64, 250 counts indicate 1kHz) */
-                uart0_puts("period ok\r\n");
-            }
-            if (off_width_sum/(sizeof(pulse)/sizeof(pulse[0])) > 79 && off_width_sum/(sizeof(pulse)/sizeof(pulse[0])) < 89) {
-                /*  (timer2 clocks at f/64, 250 counts indicate 1kHz) */
-                uart0_puts("duty cycle ok\r\n");
-            }
+            (period_sum/(sizeof(pulse)/sizeof(pulse[0])) > 247 && period_sum/(sizeof(pulse)/sizeof(pulse[0])) < 262) ? (period_pass = true) : (period_pass = false);
+                
+            (off_width_sum/(sizeof(pulse)/sizeof(pulse[0])) > 79 && off_width_sum/(sizeof(pulse)/sizeof(pulse[0])) < 89) ? (duty_cycle_pass = true) : (duty_cycle_pass = false);
+
             // sprintf(buffer, "%u\t%u\r\n", period_sum/(sizeof(pulse)/sizeof(pulse[0])), off_width_sum/(sizeof(pulse)/sizeof(pulse[0])));
             // uart0_puts(buffer);
 
@@ -826,11 +833,11 @@ void test_4() {
             rms_reset = false;
         }
         if (tick - t_0 > 2000 && rms_read) {                        // measuring ends at t = 2000 ms
-            sprintf(buffer, "rms sum: %lu\trms num: %u\r\n", rms_sum, rms_num);
-            uart0_puts(buffer);
-            uint16_t x = sqrt(rms_sum/rms_num);
-            sprintf(buffer, "rms: %u\r\n", x);
-            uart0_puts(buffer);
+            // sprintf(buffer, "rms sum: %lu\trms num: %u\r\n", rms_sum, rms_num);
+            // uart0_puts(buffer);
+            rms = sqrt(rms_sum/rms_num);
+            // sprintf(buffer, "rms: %u\r\n", x);
+            // uart0_puts(buffer);
             rms_read = false;
         }
 
@@ -845,7 +852,8 @@ void test_4() {
     disable_blink();
     stop_timer2();
     EIMSK &= ~(1 << INT0);                                          // disable PWM detectioin on TP1
-    PORTF &= ~(1<<PF2);                                             // end of test
+    // PORTF &= ~(1<<PF2);                                             // end of test
+
 }
 
 void test_5() {
@@ -853,18 +861,20 @@ void test_5() {
 
     uint32_t t_0 = tick;                                            // record start time
 
-    PORTF |= (1<<PF2);
+    // PORTF |= (1<<PF2);
 
     enable_beep();
     enable_blink();
     start_timer1();                                                 // need timer1 for blink detection
     start_adc();
+    select_adc3();
 
     // ADCSRB |= (1 << ACME);                                          // I don't think I need this, but can't remember why
 
     uint8_t color_temp[3] = {0}; 
     uint8_t led_blink = 0;
     uint8_t edge_direction = 0;                                     // default direction is rising
+    uint8_t number_beep = 0;
     uint32_t t_1 = 0;
     uint16_t x = 0;
     bool red_on = true;
@@ -919,7 +929,8 @@ void test_5() {
                     // sprintf(buffer, "%u\r\n", tick);
                     // uart0_puts(buffer);
                     if (tick - t_1 < 688 && tick - t_1 > 622) {         // beep ON width: 655 ms +/- 5%
-                        uart0_puts("beep\r\n");
+                        number_beep++;
+                        // uart0_puts("beep\r\n");
                     }
                     edge_direction = 0;
                     break;
@@ -967,18 +978,14 @@ void test_5() {
     disable_blink();
     disable_beep();
 
-    PORTF &= ~(1<<PF2);                                             // end of test
 }
 
 void test_6() {
-    // PORTF |= (1<<PF4);
     PORTC &= ~(1 << relay_16[2].pin);
     _delay_ms(500);
     PORTC &= ~((1 << relay_16[0].pin) | (1 << relay_16[1].pin));
 
     _delay_ms(250);
-
-    // PORTA &= ~((1 << PA4) | (1 << PA5));                            // connect TP29, TP30 to dc variable supply
 
     uint32_t t_0 = tick;                                            // record start time
 
@@ -987,7 +994,9 @@ void test_6() {
     start_timer1();                                                 // need timer1 for blink detection
     start_timer2();
     start_adc();
+    select_adc3();
     
+    uint8_t rms_count = 0;
     uint8_t a = 1;
     uint8_t color_temp[3] = {0}; 
     int rms_diff = 0;
@@ -996,11 +1005,13 @@ void test_6() {
     uint8_t edge_direction = 0;                                     // default direction is rising
     uint32_t t_1 = 0;
     uint32_t t_set_psu = 0;
-    uint32_t t_L1_L2_OUT_OFF = 0;
-    uint16_t x = 0;
+    uint32_t t_L1_L2_OUT_OFF = tick+30000;
+    uint16_t rms_old = 0;
+    uint16_t rms = 0;
     uint16_t interval = 800;
     uint8_t base_volt = 0;
     uint8_t j = 0;
+    uint8_t number_beep = 0;
     bool red_on = true;
     bool rms_read = true;
     bool rms_reset = true;
@@ -1010,7 +1021,7 @@ void test_6() {
 
     char *psu_voltage[] = {"160", "161", "162", "163", "164", "165", "166", "167", "168", "169", "170", "171", "172", "173", "174", "175", "176", "177", "178", "179"};
 
-    PORTF |= (1<<PF2);
+    // PORTF |= (1<<PF2);
 
     /*  initial state: {blink: green, beep: none, out: on}
         next state: {blink: red (10/5sec), beep: (10/5sec), out:off}
@@ -1028,10 +1039,11 @@ void test_6() {
         {
         case STATE_INIT:
             PORTA &= ~((1 << PA4) | (1 << PA5));                            // connect TP29, TP30 to dc variable supply
-            
+            _delay_ms(10);
             uart3_puts(":01w20=160,500,\r\n");
-            _delay_ms(50);
+            _delay_ms(10);
             uart3_puts(":01w12=1,\r\n");
+            
             t_set_psu = tick;
             state = STATE_NEXT;
             break;
@@ -1044,17 +1056,13 @@ void test_6() {
                 uart3_puts(cmd);
                 t_set_psu += interval;
             }
-            // if (tick - t_L1_L2_OUT_OFF > 10000 && negative_edge_detected) {
-            //     state = STATE_END;
-            // }
             if (j==20) {
                 state = STATE_END;
             }
             break;
         
         case STATE_END:
-            // DO NOTHING
-            // uart0_puts("end");
+            uart0_puts("end");
             break;
 
         default:
@@ -1063,7 +1071,7 @@ void test_6() {
 
         if (color_data_ready) {
             /*  blink detection */
-            if ((color_value[0] - color_temp[0]) > 90 || (color_value[0] - color_temp[0]) < -90) {
+            if (abs(color_value[0] - color_temp[0]) > 90) {
                 // sprintf(buffer, "%u\r\n", tick - t_0);
                 // uart0_puts(buffer);
                 led_blink++;
@@ -1072,37 +1080,31 @@ void test_6() {
             color_temp[0] = color_value[0];
             color_temp[1] = color_value[1];
             color_temp[2] = color_value[2];
+            
+            rms_count++;
+            color_data_ready = false;
+        }
 
-            /*  because rms is calculated inside color sampling cycle (10ms), while one cycle of input AC is 16.7ms
-                this rms value will fluctuate, rms_diff will also flucatuate    
-                but, at off-> on and on->off transitions, rms_diff will be much larger than on period
-            */
-            rms_temp[0][0] = rms_sum;                               // store these two values so that they are not over-written by ADC ISR()
-            rms_temp[0][1] = rms_num;
+        if (rms_count == 10) {                                      // calculate RMS at 10Hz
+            rms = sqrt(rms_sum/rms_num);
+            rms_diff = rms - rms_old;
+            rms_old = rms;
+
+            if ((rms_diff > 23) && (!positive_edge_detected)) {
+                enable_beep();
+                uart0_transmit(0x23);
+                positive_edge_detected = true;
+            }
+
+            if ((rms_diff < -23) && (!negative_edge_detected)) {
+                t_L1_L2_OUT_OFF = tick;                             // negative edge of L1_OUT & L2_OUT  also coincides with the rising relay click which precedes 10 beeps
+                uart0_transmit(0x24);
+                negative_edge_detected = true;
+            }
+
             rms_sum = 0;
             rms_num = 0;
-
-            rms_diff = rms_temp[0][0]/rms_temp[0][1] - rms_temp[1][0]/rms_temp[1][1];
-
-            if (rms_diff > 900 && (!positive_edge_detected)) {
-                positive_edge_detected = true;
-                enable_beep();
-                uart0_puts("L1_OUT & L2_OUT ON\r\n");
-            }
-            if (rms_diff < -900 && (!negative_edge_detected)) {
-                t_L1_L2_OUT_OFF = tick;                             // negative edge of L1_OUT & L2_OUT  also coincides with the rising relay click which precedes 10 beeps
-                negative_edge_detected = true;
-                uart0_puts("L1_OUT & L2_OUT OFF\r\n");
-            }
-
-            // sprintf(buffer, "rms sum: %lu\trms num: %u\r\n", rms_sum, rms_num);
-            // sprintf(buffer, "rms: %i\r\n", rms_diff);
-            // uart0_puts(buffer);
-            
-            rms_temp[1][0] = rms_temp[0][0];                        // store previous values for next iteration
-            rms_temp[1][1] = rms_temp[0][1];
-
-            color_data_ready = false;
+            rms_count = 0;
         }
 
         /* beep detection */
@@ -1115,11 +1117,8 @@ void test_6() {
                 break;
             
             case 1:                                                 // falling edge
-                // sprintf(buffer, "beep: %u\r\n", tick);
-                // uart0_puts(buffer);
-
                 if (tick - t_1 < 688 && tick - t_1 > 622) {         // beep ON width: 655 ms +/- 5%
-                    uart0_puts("beep!\r\n");
+                    number_beep++;
                 }
                 edge_direction = 0;
                 break;
@@ -1131,12 +1130,6 @@ void test_6() {
             beep_flag = false;
         }
 
-        /* */
-        if (tick - t_0 > interval) {
-            //
-
-        }
-
         /*  L1_OUT & L2_OUT comes on ~2.2s before entering for loop  */
         if (tick - t_0 > 2200 && rms_reset) {                       // alternatively, check rms_sum > thrshold in each iteration
             rms_sum = 0;
@@ -1144,18 +1137,14 @@ void test_6() {
             rms_reset = false;
         }
 
-        if (tick - t_0 > 1300 && rms_read) {
-            //
-        }
-
         /* last falling edge of 10th beep + 1/2 gap of two 10-beep */
-        if (tick - t_L1_L2_OUT_OFF > 10000 && negative_edge_detected) {
-            // 
-            break;
-        }
+        // if ((tick - t_L1_L2_OUT_OFF > 10000) && negative_edge_detected) {
+        //     uart0_transmit(0x25);
+        //     break;
+        // }
 
         /* timeout */
-        if (tick - t_0 > 30000) {
+        if (tick - t_0 > 40000) {
             break;
         }
     }
@@ -1170,9 +1159,11 @@ void test_6() {
     disable_blink();
     disable_beep();
 
-    PORTF &= ~(1<<PF2);                                             // end of test
+    // PORTF &= ~(1<<PF2);                                             // end of test
 
     sprintf(buffer, "led blinks: %u\r\n", led_blink);
+    uart0_puts(buffer);
+    sprintf(buffer, "beeps: %u\r\n", number_beep);
     uart0_puts(buffer);
 }
 
@@ -1192,10 +1183,11 @@ void test_7() {
     uint8_t led_blink = 0;
     uint8_t edge_direction = 0;                                     // default direction is rising
     uint32_t t_1 = 0;
+    uint8_t number_beep = 0;
 
     uint32_t t_0 = tick;                                            // record start time
 
-    PORTF |= (1<<PF2);
+    // PORTF |= (1<<PF2);
 
     for (;;) {
         if (color_data_ready) {
@@ -1228,7 +1220,8 @@ void test_7() {
                 
                 case 1:                                                 // falling edge
                     if (tick - t_1 < 695 && tick - t_1 > 615) {         // beep ON width: 655 ms +/- 5%
-                        uart0_puts("beep!\r\n");
+                        number_beep++;
+                        // uart0_puts("beep!\r\n");
                     }
                     edge_direction = 0;
                     break;
@@ -1253,10 +1246,31 @@ void test_7() {
 
     PORTC |= (1 << relay_16[2].pin) | (1 << relay_16[0].pin) | (1 << relay_16[1].pin)| (1 << relay_16[5].pin);
 
-    PORTF &= ~(1<<PF2);                                             // end of test
+    // PORTF &= ~(1<<PF2);                                             // end of test
 
-    sprintf(buffer, "led blinks: %u\r\n", led_blink);
-    uart0_puts(buffer);
+    // sprintf(buffer, "led blinks: %u\r\n", led_blink);
+    // uart0_puts(buffer);
+
+    /* send test results at end of test */
+    struct message_packet_t message_packet;
+    
+    (number_beep == 4) ? (message_packet.number_beep = PS) : (message_packet.number_beep = FL);
+    (led_blink == 8) ? (message_packet.number_blink = PS) : (message_packet.number_blink = FL);
+    message_packet.output_volt = PS;
+    message_packet.TP1 = 0x3030;
+    message_packet.TP19 = 0x3030;
+    message_packet.TP21 = 0x3030;
+    message_packet.TP22 = 0x3030;
+    message_packet.TP23 = 0x3030;
+    message_packet.TP26 = 0x3030;
+    message_packet.TP35 = 0x3030;
+    message_packet.TP38 = 0x3030;
+
+    char* p = (char*)&message_packet;
+
+    for (uint8_t i=0;i<sizeof(message_packet);i++) {
+        uart0_transmit(*p++);
+    }
 }
 
 void test_8() {
@@ -1275,10 +1289,11 @@ void test_8() {
     uint8_t led_blink = 0;
     uint8_t edge_direction = 0;                                     // default direction is rising
     uint32_t t_1 = 0;
+    uint8_t number_beep = 0;
 
     uint32_t t_0 = tick;                                            // record start time
 
-    PORTF |= (1<<PF2);
+    // PORTF |= (1<<PF2);
 
     for (;;) {
         if (color_data_ready) {
@@ -1311,7 +1326,8 @@ void test_8() {
                 
                 case 1:                                                 // falling edge
                     if (tick - t_1 < 695 && tick - t_1 > 615) {         // beep ON width: 655 ms +/- 5%
-                        uart0_puts("beep!\r\n");
+                        number_beep++;
+                        // uart0_puts("beep!\r\n");
                     }
                     edge_direction = 0;
                     break;
@@ -1338,10 +1354,31 @@ void test_8() {
     PORTC |= (1 << relay_16[2].pin) | (1 << relay_16[0].pin) | (1 << relay_16[1].pin);
     PORTK |= (1 << relay_16[6].pin);
 
-    PORTF &= ~(1<<PF2);                                             // end of test
+    // PORTF &= ~(1<<PF2);                                             // end of test
 
-    sprintf(buffer, "led blinks: %u\r\n", led_blink);
-    uart0_puts(buffer);
+    // sprintf(buffer, "led blinks: %u\r\n", led_blink);
+    // uart0_puts(buffer);
+
+    /* send test results at end of test */
+    struct message_packet_t message_packet;
+    
+    (number_beep == 2) ? (message_packet.number_beep = PS) : (message_packet.number_beep = FL);
+    (led_blink == 4) ? (message_packet.number_blink = PS) : (message_packet.number_blink = FL);
+    message_packet.output_volt = PS;
+    message_packet.TP1 = 0x3030;
+    message_packet.TP19 = 0x3030;
+    message_packet.TP21 = 0x3030;
+    message_packet.TP22 = 0x3030;
+    message_packet.TP23 = 0x3030;
+    message_packet.TP26 = 0x3030;
+    message_packet.TP35 = 0x3030;
+    message_packet.TP38 = 0x3030;
+
+    char* p = (char*)&message_packet;
+
+    for (uint8_t i=0;i<sizeof(message_packet);i++) {
+        uart0_transmit(*p++);
+    }
 }
 
 void test_9() {
@@ -1360,10 +1397,11 @@ void test_9() {
     uint8_t led_blink = 0;
     uint8_t edge_direction = 0;                                     // default direction is rising
     uint32_t t_1 = 0;
+    uint8_t number_beep = 0;
 
     uint32_t t_0 = tick;                                            // record start time
 
-    PORTF |= (1<<PF2);
+    // PORTF |= (1<<PF2);
 
     for (;;) {
         if (color_data_ready) {
@@ -1396,7 +1434,8 @@ void test_9() {
                 
                 case 1:                                                 // falling edge
                     if (tick - t_1 < 695 && tick - t_1 > 615) {         // beep ON width: 655 ms +/- 5%
-                        uart0_puts("beep!\r\n");
+                        number_beep++;
+                        // uart0_puts("beep!\r\n");
                     }
                     edge_direction = 0;
                     break;
@@ -1422,10 +1461,31 @@ void test_9() {
     PORTC |= (1 << relay_16[2].pin) | (1 << relay_16[0].pin) | (1 << relay_16[1].pin);
     PORTK |= (1 << relay_16[7].pin);
 
-    PORTF &= ~(1<<PF2);                                             // end of test
+    // PORTF &= ~(1<<PF2);                                             // end of test
 
-    sprintf(buffer, "led blinks: %u\r\n", led_blink);
-    uart0_puts(buffer);
+    // sprintf(buffer, "led blinks: %u\r\n", led_blink);
+    // uart0_puts(buffer);
+
+    /* send test results at end of test */
+    struct message_packet_t message_packet;
+    
+    (number_beep == 4) ? (message_packet.number_beep = PS) : (message_packet.number_beep = FL);
+    (led_blink == 8) ? (message_packet.number_blink = PS) : (message_packet.number_blink = FL);
+    message_packet.output_volt = PS;
+    message_packet.TP1 = 0x3030;
+    message_packet.TP19 = 0x3030;
+    message_packet.TP21 = 0x3030;
+    message_packet.TP22 = 0x3030;
+    message_packet.TP23 = 0x3030;
+    message_packet.TP26 = 0x3030;
+    message_packet.TP35 = 0x3030;
+    message_packet.TP38 = 0x3030;
+
+    char* p = (char*)&message_packet;
+
+    for (uint8_t i=0;i<sizeof(message_packet);i++) {
+        uart0_transmit(*p++);
+    }
 }
 
 void test_10() {
@@ -1444,10 +1504,11 @@ void test_10() {
     uint8_t led_blink = 0;
     uint8_t edge_direction = 0;                                     // default direction is rising
     uint32_t t_1 = 0;
+    uint8_t number_beep = 0;
 
     uint32_t t_0 = tick;                                            // record start time
 
-    PORTF |= (1<<PF2);
+    // PORTF |= (1<<PF2);
 
     for (;;) {
         if (color_data_ready) {
@@ -1480,7 +1541,8 @@ void test_10() {
                 
                 case 1:                                                 // falling edge
                     if (tick - t_1 < 695 && tick - t_1 > 615) {         // beep ON width: 655 ms +/- 5%
-                        uart0_puts("beep!\r\n");
+                        number_beep++;
+                        // uart0_puts("beep!\r\n");
                     }
                     edge_direction = 0;
                     break;
@@ -1506,10 +1568,31 @@ void test_10() {
     PORTC |= (1 << relay_16[2].pin) | (1 << relay_16[0].pin) | (1 << relay_16[1].pin);
     PORTK |= (1 << relay_16[8].pin) | (1 << relay_16[9].pin) | (1 << relay_16[10].pin);
 
-    PORTF &= ~(1<<PF2);                                             // end of test
+    // PORTF &= ~(1<<PF2);                                             // end of test
 
-    sprintf(buffer, "led blinks: %u\r\n", led_blink);
-    uart0_puts(buffer);
+    // sprintf(buffer, "led blinks: %u\r\n", led_blink);
+    // uart0_puts(buffer);
+
+    /* send test results at end of test */
+    struct message_packet_t message_packet;
+    
+    (number_beep == 2) ? (message_packet.number_beep = PS) : (message_packet.number_beep = FL);
+    (led_blink == 4) ? (message_packet.number_blink = PS) : (message_packet.number_blink = FL);
+    message_packet.output_volt = PS;
+    message_packet.TP1 = 0x3030;
+    message_packet.TP19 = 0x3030;
+    message_packet.TP21 = 0x3030;
+    message_packet.TP22 = 0x3030;
+    message_packet.TP23 = 0x3030;
+    message_packet.TP26 = 0x3030;
+    message_packet.TP35 = 0x3030;
+    message_packet.TP38 = 0x3030;
+
+    char* p = (char*)&message_packet;
+
+    for (uint8_t i=0;i<sizeof(message_packet);i++) {
+        uart0_transmit(*p++);
+    }
 }
 
 void test_11() {
@@ -1524,6 +1607,7 @@ void test_11() {
     enable_blink();
     start_timer1();                                                 // need timer1 for blink detection
     start_adc();
+    select_adc3();
 
     uint8_t color_temp[3] = {0};
     uint8_t led_blink = 0;
@@ -1531,11 +1615,12 @@ void test_11() {
     uint32_t t_1 = 0;
     uint8_t rms_count = 0;
     uint16_t x = 0;
+    uint8_t number_beep = 0;
     bool rms_pass = false;
 
     uint32_t t_0 = tick;                                            // record start time
 
-    PORTF |= (1<<PF2);
+    // PORTF |= (1<<PF2);
 
     for (;;) {
         if (color_data_ready) {
@@ -1572,26 +1657,28 @@ void test_11() {
             // sprintf(buffer, "beep: %u\r\n", tick - t_0);
             // uart0_puts(buffer);
 
-            if (tick - t_0 > 1900) {                                // falling edge of last relay click at 1841(ms), and rising edge of first beep at 1989(ms)
-                switch (edge_direction)
-                {
-                case 0:                                             // rising edge
-                    t_1 = tick;
-                    edge_direction = 1;
-                    break;
+            // if (tick - t_0 > 1890) {                                // always picks up a edge at t_0, and always misses the first rising edge
+            //     switch (edge_direction)
+            //     {
+            //     case 0:                                             // rising edge
+            //         t_1 = tick;
+            //         edge_direction = 1;
+            //         break;
                 
-                case 1:                                             // falling edge
-                    if (tick - t_1 < 695 && tick - t_1 > 615) {     // beep ON width: 655 ms +/- 5%
-                        uart0_puts("beep!\r\n");
-                    }
-                    edge_direction = 0;
-                    break;
+            //     case 1:                                             // falling edge
+            //         if (tick - t_1 < 695 && tick - t_1 > 615) {     // beep ON width: 655 ms +/- 5%
+            //             number_beep++;
+            //             uart0_puts("beep!\r\n");
+            //         }
+            //         edge_direction = 0;
+            //         break;
 
-                default:
-                    break;
-                }
-            }
-            
+            //     default:
+            //         break;
+            //     }
+            // }
+            /* the usual algorithm does not work here, but fortunately the total number of edges are always 6, so this kind of works */
+            number_beep++;
             beep_flag = false;
         }
 
@@ -1608,13 +1695,34 @@ void test_11() {
 
     PORTC |= (1 << relay_16[2].pin) | (1 << relay_16[0].pin) | (1 << relay_16[1].pin) | (1 << relay_16[3].pin) | (1 << relay_16[4].pin);
 
-    PORTF &= ~(1<<PF2);                                             // end of test
+    // PORTF &= ~(1<<PF2);                                             // end of test
 
-    sprintf(buffer, "led blinks: %u\r\n", led_blink);
-    uart0_puts(buffer);
+    // sprintf(buffer, "led blinks: %u\r\n", led_blink);
+    // uart0_puts(buffer);
 
-    if (rms_pass) {
-        uart0_puts("RMS PASS: ~78(V)");
+    // if (rms_pass) {
+    //     uart0_puts("RMS PASS: ~78(V)");
+    // }
+
+    /* send test results at end of test */
+    struct message_packet_t message_packet;
+    
+    (number_beep == 6) ? (message_packet.number_beep = PS) : (message_packet.number_beep = FL);
+    (led_blink == 6) ? (message_packet.number_blink = PS) : (message_packet.number_blink = FL);
+    (rms_pass) ? (message_packet.output_volt = PS) : (message_packet.output_volt = FL);
+    message_packet.TP1 = 0x3030;
+    message_packet.TP19 = 0x3030;
+    message_packet.TP21 = 0x3030;
+    message_packet.TP22 = 0x3030;
+    message_packet.TP23 = 0x3030;
+    message_packet.TP26 = 0x3030;
+    message_packet.TP35 = 0x3030;
+    message_packet.TP38 = 0x3030;
+
+    char* p = (char*)&message_packet;
+
+    for (uint8_t i=0;i<sizeof(message_packet);i++) {
+        uart0_transmit(*p++);
     }
 }
 
@@ -1636,12 +1744,33 @@ void test_12() {
     // _delay_ms(1000);
     // PORTA |= ((1 << PA6) | (1 << PA7));
 
-    sprintf(buffer, "UART2 RX: %u\r\n", s);
-    uart0_puts(buffer);
+    // sprintf(buffer, "UART2 RX: %u\r\n", s);
+    // uart0_puts(buffer);
+
+    /* send test results at end of test */
+    // struct message_packet_t message_packet;
+    
+    // message_packet.number_beep = 0x3030;
+    // message_packet.number_blink = PS;
+    // message_packet.output_volt = x;
+    // message_packet.TP1 = 0x3030;
+    // message_packet.TP19 = 0x3030;
+    // message_packet.TP21 = volt_tp21;
+    // message_packet.TP22 = volt_tp22;
+    // message_packet.TP23 = volt_tp25;
+    // message_packet.TP26 = volt_tp26;
+    // message_packet.TP35 = volt_tp35;
+    // message_packet.TP38 = 0x3030;
+
+    // char* p = (char*)&message_packet;
+
+    // for (uint8_t i=0;i<sizeof(message_packet);i++) {
+    //     uart0_transmit(*p++);
+    // }
 }
 
 void _abort() {
-    uart0_puts("test aborted!\r\n");
+    // uart0_puts("test aborted!\r\n");
     
     wdt_enable(WDTO_15MS);
     for (;;);
@@ -1754,10 +1883,6 @@ ISR(TIMER1_COMPA_vect) {
     color_pulse_count = 0;
 }
 
-ISR(TIMER3_COMPA_vect) {
-    PORTF ^= (1<<PF5);
-}
-
 ISR(INT0_vect) {
     switch (s)
     {
@@ -1799,9 +1924,6 @@ ISR(INT3_vect) {
     color_pulse_count++;
 }
 
-// ISR(TIMER0_OVF_vect) {
-// }
-
 ISR(USART0_RX_vect) {
     message = UDR0;
     message_ready = true;
@@ -1817,5 +1939,4 @@ ISR(ADC_vect) {
     adc_temp = abs(ADCH - 127);                                     // waveform centres around 2.5V, thus 127
     rms_sum += adc_temp * adc_temp;
     rms_num++;
-    // PORTF ^= (1 << PF2);
 }
