@@ -1062,7 +1062,7 @@ void test_6() {
             break;
         
         case STATE_END:
-            uart0_puts("end");
+            // uart0_puts("end");
             break;
 
         default:
@@ -1093,13 +1093,13 @@ void test_6() {
             if ((rms_diff > 23) && (!positive_edge_detected)) {
                 enable_beep();
                 uart0_transmit(0x23);
-                positive_edge_detected = true;
+                // positive_edge_detected = true;
             }
 
             if ((rms_diff < -23) && (!negative_edge_detected)) {
                 t_L1_L2_OUT_OFF = tick;                             // negative edge of L1_OUT & L2_OUT  also coincides with the rising relay click which precedes 10 beeps
                 uart0_transmit(0x24);
-                negative_edge_detected = true;
+                // negative_edge_detected = true;
             }
 
             rms_sum = 0;
@@ -1138,10 +1138,10 @@ void test_6() {
         }
 
         /* last falling edge of 10th beep + 1/2 gap of two 10-beep */
-        // if ((tick - t_L1_L2_OUT_OFF > 10000) && negative_edge_detected) {
-        //     uart0_transmit(0x25);
-        //     break;
-        // }
+        if ((tick - t_L1_L2_OUT_OFF > 10000) && negative_edge_detected) {
+            uart0_transmit(0x25);
+            // break;
+        }
 
         /* timeout */
         if (tick - t_0 > 40000) {
